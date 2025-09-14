@@ -95,32 +95,11 @@ class Model:
             if 'args' in checkpoint and hasattr(checkpoint['args'], 'class_names'):
                 self.args.class_names = checkpoint['args'].class_names
                 self.class_names = checkpoint['args'].class_names
-                
-            checkpoint_num_classes = checkpoint['model']['class_embed.bias'].shape[0]
-            if checkpoint_num_classes != args.num_classes + 1:
-                logger.warning(
-                    f"num_classes mismatch: pretrain weights has {checkpoint_num_classes - 1} classes, but your model has {args.num_classes} classes\n"
-                    f"reinitializing detection head with {checkpoint_num_classes - 1} classes"
-                )
-                self.reinitialize_detection_head(checkpoint_num_classes)
-            # add support to exclude_keys
-            # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
+
             if args.pretrain_exclude_keys is not None:
                 assert isinstance(args.pretrain_exclude_keys, list)
                 for exclude_key in args.pretrain_exclude_keys:
                     checkpoint['model'].pop(exclude_key)
-            if args.pretrain_keys_modify_to_load is not None:
-                from util.obj365_to_coco_model import get_coco_pretrain_from_obj365
-                assert isinstance(args.pretrain_keys_modify_to_load, list)
-                for modify_key_to_load in args.pretrain_keys_modify_to_load:
-                    try:
-                        checkpoint['model'][modify_key_to_load] = get_coco_pretrain_from_obj365(
-                            model_without_ddp.state_dict()[modify_key_to_load],
-                            checkpoint['model'][modify_key_to_load]
-                        )
-                    except:
-                        print(f"Failed to load {modify_key_to_load}, deleting from checkpoint")
-                        checkpoint['model'].pop(modify_key_to_load)
 
             # we may want to resume training with a smaller number of groups for group detr
             num_desired_queries = args.num_queries * args.group_detr
@@ -129,7 +108,11 @@ class Model:
                 if any(name.endswith(x) for x in query_param_names):
                     checkpoint['model'][name] = state[:num_desired_queries]
 
-            self.model.load_state_dict(checkpoint['model'], strict=False)
+            incompatible_keys = self.model.load_state_dict(checkpoint['model'], strict=False)
+            if incompatible_keys.missing_keys:
+                print(f"Missing keys: {incompatible_keys.missing_keys}")
+            if incompatible_keys.unexpected_keys:
+                print(f"Unexpected keys: {incompatible_keys.unexpected_keys}")
 
         if args.backbone_lora:
             print("Applying LORA to backbone")
@@ -564,91 +547,6 @@ class Model:
         print("ONNX export completed successfully")
         self.model = self.model.to(device)
             
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('LWDETR training and evaluation script', parents=[get_args_parser()])
-    args = parser.parse_args()
-
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    
-    config = vars(args)  # Convert Namespace to dictionary
-    
-    if args.subcommand == 'distill':
-        distill(**config)   
-    elif args.subcommand is None:
-        main(**config)
-    elif args.subcommand == 'export_model':
-        filter_keys = [
-            "num_classes",
-            "grad_accum_steps",
-            "lr",
-            "lr_encoder",
-            "weight_decay",
-            "epochs",
-            "lr_drop",
-            "clip_max_norm",
-            "lr_vit_layer_decay",
-            "lr_component_decay",
-            "dropout",
-            "drop_path",
-            "drop_mode",
-            "drop_schedule",
-            "cutoff_epoch",
-            "pretrained_encoder",
-            "pretrain_weights",
-            "pretrain_exclude_keys",
-            "pretrain_keys_modify_to_load",
-            "freeze_florence",
-            "freeze_aimv2",
-            "decoder_norm",
-            "set_cost_class",
-            "set_cost_bbox",
-            "set_cost_giou",
-            "cls_loss_coef",
-            "bbox_loss_coef",
-            "giou_loss_coef",
-            "focal_alpha",
-            "aux_loss",
-            "sum_group_losses",
-            "use_varifocal_loss",
-            "use_position_supervised_loss",
-            "ia_bce_loss",
-            "dataset_file",
-            "coco_path",
-            "dataset_dir",
-            "square_resize_div_64",
-            "output_dir",
-            "checkpoint_interval",
-            "seed",
-            "resume",
-            "start_epoch",
-            "eval",
-            "use_ema",
-            "ema_decay",
-            "ema_tau",
-            "num_workers",
-            "device",
-            "world_size",
-            "dist_url",
-            "sync_bn",
-            "fp16_eval",
-            "infer_dir",
-            "verbose",
-            "opset_version",
-            "dry_run",
-            "shape",
-        ]
-        for key in filter_keys:
-            config.pop(key, None)  # Use pop with None to avoid KeyError
-            
-        from deploy.export import main as export_main
-        if args.batch_size != 1:
-            config['batch_size'] = 1
-            print(f"Only batch_size 1 is supported for onnx export, \
-                 but got batchsize = {args.batch_size}. batch_size is forcibly set to 1.")
-        export_main(**config)
-
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--num_classes', default=2, type=int)
